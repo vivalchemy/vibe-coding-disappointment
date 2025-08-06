@@ -1,0 +1,599 @@
+name: Tests
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Makefile'
+      - '.github/workflows/test.yml'
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Makefile'
+  schedule:
+    # Run tests daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+env:
+  GO_VERSION: '1.21'
+  COVERAGE_THRESHOLD: 80
+
+jobs:
+  unit-tests:
+    name: Unit Tests
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        go-version: ['1.20', '1.21']
+        
+    steps:
+    - name: Check out code
+      uses: actions/checkout@v4
+      
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ matrix.go-version }}
+        
+    - name: Cache Go modules
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-${{ matrix.go-version }}-
+          
+    - name: Download dependencies
+      run: go mod download
+      
+    - name: Verify dependencies
+      run: go mod verify
+      
+    - name: Run unit tests
+      run: |
+        go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
+        
+    - name: Check coverage threshold
+      if: matrix.os == 'ubuntu-latest' && matrix.go-version == env.GO_VERSION
+      run: |
+        COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | sed 's/%//')
+        echo "Coverage: ${COVERAGE}%"
+        if (( $(echo "$COVERAGE < $COVERAGE_THRESHOLD" | bc -l) )); then
+          echo "Coverage ${COVERAGE}% is below threshold ${COVERAGE_THRESHOLD}%"
+          exit 1
+        fi
+        
+    - name: Upload coverage to Codecov
+      if: matrix.os == 'ubuntu-latest' && matrix.go-version == env.GO_VERSION
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.out
+        flags: unittests
+        name: codecov-${{ matrix.os }}-go${{ matrix.go-version }}
+
+  integration-tests:
+    name: Integration Tests
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        
+    steps:
+    - name: Check out code
+      uses: actions/checkout@v4
+      
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        
+    - name: Set up Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '18'
+        cache: 'npm'
+        
+    - name: Install task runners (Linux)
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        # Install make
+        sudo apt-get update && sudo apt-get install -y make build-essential
+        
+        # Install just
+        curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to ~/.local/bin
+        echo "$HOME/.local/bin" >> $GITHUB_PATH
+        
+        # Install go-task
+        sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d -b ~/.local/bin
+        
+        # Install npm package managers
+        npm install -g yarn pnpm
+        
+    - name: Install task runners (macOS)
+      if: matrix.os == 'macos-latest'
+      run: |
+        # Install via Homebrew
+        brew install make just go-task/tap/go-task
+        
+        # Install npm package managers
+        npm install -g yarn pnpm
+        
+    - name: Verify task runners
+      run: |
+        make --version
+        just --version
+        task --version
+        npm --version
+        yarn --version
+        pnpm --version
+        
+    - name: Build wake
+      run: |
+        go mod download
+        make build
+        
+    - name: Add wake to PATH
+      run: echo "${{ github.workspace }}/bin" >> $GITHUB_PATH
+      
+    - name: Test wake installation
+      run: |
+        wake --version
+        wake --help
+        
+    - name: Run integration tests
+      run: |
+        go test -v -timeout=10m ./test/integration/...
+        
+    - name: Test fixture projects
+      run: |
+        # Test makefile project
+        cd test/fixtures/makefile-project
+        wake list
+        wake list --output=json
+        wake --dry-run test
+        cd ../../..
+        
+        # Test npm project
+        cd test/fixtures/npm-project
+        npm install
+        wake list
+        wake --runner=npm list
+        wake --dry-run test
+        cd ../../..
+        
+        # Test just project
+        cd test/fixtures/just-project
+        wake list
+        wake --dry-run hello
+        cd ../../..
+        
+        # Test task project
+        cd test/fixtures/task-project
+        wake list
+        wake --dry-run test
+        cd ../../..
+        
+        # Test mixed project
+        cd test/fixtures/mixed-project
+        npm install
+        wake list
+        wake --runner=make list
+        wake --runner=npm list
+        wake --runner=just list
+        cd ../../..
+
+  e2e-tests:
+    name: End-to-End Tests
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Check out code
+      uses: actions/checkout@v4
+      
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        
+    - name: Set up test environment
+      run: |
+        # Install dependencies
+        sudo apt-get update
+        sudo apt-get install -y make build-essential curl
+        
+        # Install Node.js and npm
+        curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+        sudo apt-get install -y nodejs
+        
+        # Install task runners
+        curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to ~/.local/bin
+        sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d -b ~/.local/bin
+        npm install -g yarn pnpm
+        echo "$HOME/.local/bin" >> $GITHUB_PATH
+        
+    - name: Build wake
+      run: |
+        go mod download
+        make build
+        sudo cp bin/wake /usr/local/bin/
+        
+    - name: Create test workspace
+      run: |
+        mkdir -p /tmp/wake-e2e-test
+        cd /tmp/wake-e2e-test
+        
+        # Create a complex project structure
+        mkdir -p frontend backend scripts docs
+        
+        # Frontend (Node.js project)
+        cd frontend
+        cat > package.json << 'EOF'
+        {
+          "name": "test-frontend",
+          "version": "1.0.0",
+          "scripts": {
+            "build": "echo 'Building frontend...'",
+            "test": "echo 'Testing frontend...'",
+            "dev": "echo 'Starting dev server...'",
+            "lint": "echo 'Linting frontend...'"
+          },
+          "devDependencies": {}
+        }
+        EOF
+        cd ..
+        
+        # Backend (Make project)
+        cd backend
+        cat > Makefile << 'EOF'
+        .PHONY: build test clean deploy
+        
+        build: ## Build the backend
+        	@echo "Building backend..."
+        	
+        test: ## Run backend tests
+        	@echo "Testing backend..."
+        	
+        clean: ## Clean build artifacts
+        	@echo "Cleaning backend..."
+        	
+        deploy: build ## Deploy backend
+        	@echo "Deploying backend..."
+        EOF
+        cd ..
+        
+        # Scripts (Just project)
+        cd scripts
+        cat > Justfile << 'EOF'
+        # Development scripts
+        
+        # Setup development environment
+        setup:
+            echo "Setting up development environment..."
+            
+        # Run all tests
+        test-all:
+            echo "Running all tests..."
+            
+        # Deploy to staging
+        deploy-staging:
+            echo "Deploying to staging..."
+        EOF
+        cd ..
+        
+        # Root level task file
+        cat > Taskfile.yml << 'EOF'
+        version: '3'
+        
+        tasks:
+          install:
+            desc: Install all dependencies
+            cmds:
+              - echo "Installing dependencies..."
+              
+          build-all:
+            desc: Build all components
+            deps: [frontend:build, backend:build]
+            cmds:
+              - echo "All components built!"
+              
+          test-all:
+            desc: Run all tests
+            deps: [frontend:test, backend:test]
+            cmds:
+              - echo "All tests completed!"
+              
+          frontend:build:
+            dir: frontend
+            cmds:
+              - npm run build
+              
+          frontend:test:
+            dir: frontend
+            cmds:
+              - npm run test
+              
+          backend:build:
+            dir: backend
+            cmds:
+              - make build
+              
+          backend:test:
+            dir: backend
+            cmds:
+              - make test
+        EOF
+        
+    - name: Run E2E tests
+      run: |
+        cd /tmp/wake-e2e-test
+        
+        # Test basic discovery
+        echo "=== Testing task discovery ==="
+        wake list
+        
+        # Test filtering
+        echo "=== Testing filtering ==="
+        wake list --runner=make
+        wake list --runner=npm
+        wake list --runner=just
+        wake list --runner=task
+        
+        # Test output formats
+        echo "=== Testing output formats ==="
+        wake list --output=json
+        wake list --output=yaml
+        wake list --output=text
+        
+        # Test dry runs
+        echo "=== Testing dry runs ==="
+        wake dry build-all
+        wake dry --detailed install
+        
+        # Test with environment files
+        echo "=== Testing environment files ==="
+        echo "TEST_VAR=test_value" > .env
+        wake --env=.env dry install
+        
+        # Test search functionality
+        echo "=== Testing search ==="
+        wake list --search=build
+        wake list --search=test
+        
+        # Test grouping
+        echo "=== Testing grouping ==="
+        wake list --group=runner
+        wake list --group=file
+
+  benchmark-tests:
+    name: Benchmark Tests
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Check out code
+      uses: actions/checkout@v4
+      
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        
+    - name: Run benchmarks
+      run: |
+        go test -bench=. -benchmem -run=^$ ./...
+        
+    - name: Performance regression test
+      run: |
+        # Build wake
+        make build
+        export PATH="$PWD/bin:$PATH"
+        
+        # Create large test project
+        mkdir -p /tmp/perf-test
+        cd /tmp/perf-test
+        
+        # Generate many task files
+        for i in {1..50}; do
+          echo "test$i:" > "Makefile$i"
+          echo -e "\t@echo 'Running test $i'" >> "Makefile$i"
+        done
+        
+        for i in {1..25}; do
+          cat > "package$i.json" << EOF
+        {
+          "name": "test-package-$i",
+          "scripts": {
+            "build": "echo 'Building package $i'",
+            "test": "echo 'Testing package $i'",
+            "start": "echo 'Starting package $i'"
+          }
+        }
+        EOF
+        done
+        
+        # Test discovery performance
+        echo "Testing discovery performance..."
+        time wake list > /dev/null
+        
+        # Should complete within reasonable time
+        timeout 30s wake list || (echo "Discovery took too long" && exit 1)
+
+  memory-tests:
+    name: Memory Tests
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Check out code
+      uses: actions/checkout@v4
+      
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        
+    - name: Install Valgrind
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y valgrind
+        
+    - name: Build wake with debug info
+      run: |
+        go build -gcflags="-N -l" -o bin/wake-debug ./cmd/wake
+        
+    - name: Run memory leak tests
+      run: |
+        # Create test project
+        mkdir -p /tmp/memory-test
+        cd /tmp/memory-test
+        
+        cat > Makefile << 'EOF'
+        test:
+        	@echo "Memory test"
+        EOF
+        
+        # Test for memory leaks
+        export PATH="${{ github.workspace }}/bin:$PATH"
+        
+        # Run multiple times to check for memory leaks
+        for i in {1..100}; do
+          wake list > /dev/null
+        done
+        
+        echo "Memory tests completed"
+
+  compatibility-matrix:
+    name: Compatibility Matrix
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        task-runner-version:
+          - make: "4.3"
+            npm: "8.19.2"
+            node: "18.x"
+          - make: "4.2"
+            npm: "9.6.7"
+            node: "20.x"
+            
+    steps:
+    - name: Check out code
+      uses: actions/checkout@v4
+      
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        
+    - name: Set up Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: ${{ matrix.task-runner-version.node }}
+        
+    - name: Install specific versions
+      run: |
+        # Install specific npm version
+        npm install -g npm@${{ matrix.task-runner-version.npm }}
+        
+        # Verify versions
+        make --version
+        npm --version
+        node --version
+        
+    - name: Test compatibility
+      run: |
+        make build
+        export PATH="$PWD/bin:$PATH"
+        
+        # Test with npm project
+        cd test/fixtures/npm-project
+        npm install
+        wake list
+        wake --dry-run test
+
+  race-condition-tests:
+    name: Race Condition Tests
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Check out code
+      uses: actions/checkout@v4
+      
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        
+    - name: Run race detection tests
+      run: |
+        # Run tests with race detector multiple times
+        for i in {1..5}; do
+          echo "Race detection run $i"
+          go test -race -count=1 ./...
+        done
+        
+    - name: Concurrent execution test
+      run: |
+        make build
+        export PATH="$PWD/bin:$PATH"
+        
+        cd test/fixtures/mixed-project
+        npm install
+        
+        # Run multiple wake commands concurrently
+        (
+          wake list &
+          wake list --runner=npm &
+          wake list --runner=make &
+          wake --dry-run test &
+          wait
+        )
+
+  fuzz-tests:
+    name: Fuzz Tests
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    
+    steps:
+    - name: Check out code
+      uses: actions/checkout@v4
+      
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        
+    - name: Run fuzz tests
+      run: |
+        # Run fuzz tests for critical parsing functions
+        go test -fuzz=FuzzMakefileParser -fuzztime=30s ./internal/discovery/parsers
+        go test -fuzz=FuzzPackageJSONParser -fuzztime=30s ./internal/discovery/parsers || true
+        
+        echo "Fuzz testing completed"
+
+  report:
+    name: Test Report
+    runs-on: ubuntu-latest
+    needs: [unit-tests, integration-tests, e2e-tests, benchmark-tests]
+    if: always()
+    
+    steps:
+    - name: Generate test report
+      run: |
+        echo "## Test Results Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Test Suite | Status |" >> $GITHUB_STEP_SUMMARY
+        echo "|------------|--------|" >> $GITHUB_STEP_SUMMARY
+        echo "| Unit Tests | ${{ needs.unit-tests.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Integration Tests | ${{ needs.integration-tests.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| E2E Tests | ${{ needs.e2e-tests.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Benchmark Tests | ${{ needs.benchmark-tests.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY

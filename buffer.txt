@@ -1,0 +1,65 @@
+type GlobalOptions struct {
+	// Configuration options
+	ConfigFile string
+	LogLevel   string
+	LogFormat  string
+
+	// Filtering options
+	Runner     string
+	ShowHidden bool
+	Tags       []string
+
+	// Environment options
+	EnvFiles   []string
+	WorkingDir string
+
+	// Output options
+	OutputFormat string
+	NoColor      bool
+	Quiet        bool
+	Verbose      bool
+
+	// Performance options
+	MaxDepth   int
+	NoCache    bool
+	Concurrent bool
+
+	// Debugging options
+	Debug   bool
+	Profile bool
+	DryRun  bool
+}
+
+
+type Options struct {
+	Config       *config.Config
+	Discovery    *discovery.Registry
+	Executor     *runner.Executor
+	Logger       logger.Logger
+	AppContext   *app.Context
+	Theme        string
+	KeyProfile   string
+	AltScreen    bool
+	MouseEnabled bool
+}
+
+
+type App struct {
+	// Core components
+	config    *config.Config
+	logger    logger.Logger
+	discovery *discovery.Scanner
+	runner    *runner.Executor
+	output    *output.Manager
+
+	// State management
+	tasks   map[string]*task.Task
+	tasksMu sync.RWMutex
+	ctx     context.Context
+	cancel  context.CancelFunc
+
+	// Event channels
+	taskEvents    chan *TaskEvent
+	outputEvents  chan *OutputEvent
+	discoveryDone chan struct{}
+}
