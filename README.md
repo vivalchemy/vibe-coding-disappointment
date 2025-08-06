@@ -1,3 +1,7 @@
+My attempt at vibe coding and debugging
+Result: Utter disappointment
+
+---
 Here's the complete README.md file for the Wake project:```markdown
 # Wake - Universal Task Runner
   A unified interface for all your project task runners
